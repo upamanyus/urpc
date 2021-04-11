@@ -129,7 +129,7 @@ func MakeRPCClient(host string) *RPCClient {
 	return cl
 }
 
-func (cl *RPCClient) Call(rpcid uint64, args []byte, reply *[]byte) {
+func (cl *RPCClient) Call(rpcid uint64, args []byte, reply *[]byte) bool {
 	cb := callback{reply: reply, done: new(bool), cond: sync.NewCond(cl.mu)}
 	*cb.done = false
 	cl.mu.Lock()
@@ -156,4 +156,5 @@ func (cl *RPCClient) Call(rpcid uint64, args []byte, reply *[]byte) {
 		cb.cond.Wait()
 	}
 	cl.mu.Unlock()
+	return false
 }
