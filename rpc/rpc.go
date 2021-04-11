@@ -18,7 +18,9 @@ func (srv *RPCServer) rpcHandle(c net.Conn, rpcid uint64, seqno uint64, data []b
 	e.PutBytes(replyData)
 	_, err := c.Write(e.Finish()) // TODO: contention? should we buffer these in userspace too?
 	if err != nil {
-		panic(err)
+		// client might close the connection by the time that we finish
+		// processing their request
+		// panic(err)
 	}
 }
 
