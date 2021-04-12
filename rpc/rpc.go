@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"fmt"
 )
 
 func (srv *RPCServer) rpcHandle(c net.Conn, rpcid uint64, seqno uint64, data []byte) {
@@ -16,45 +17,38 @@ func (srv *RPCServer) rpcHandle(c net.Conn, rpcid uint64, seqno uint64, data []b
 	e.PutInt(seqno)
 	e.PutInt(uint64(len(replyData)))
 	e.PutBytes(replyData)
+	fmt.Println("Finishing")
 	_, err := c.Write(e.Finish()) // TODO: contention? should we buffer these in userspace too?
+	fmt.Printf("Finished %+v\n", replyData)
 	if err != nil {
+		panic(err)
 		// client might close the connection by the time that we finish
 		// processing their request
 		// panic(err)
 	}
 }
 
-func (srv *RPCServer) handleConn(c net.Conn) {
-	for {
-		// header format: [rpcid, seqno, dataLen]
-		headerData := make([]byte, 8*3)
-		_, err := io.ReadFull(c, headerData)
-
-		if err != nil {
-			break
-		}
-		d := marshal.NewDec(headerData)
-		rpcid := d.GetInt()
-		dataLen := d.GetInt()
-		seqno := d.GetInt()
-
-		data := make([]byte, dataLen)
-		io.ReadFull(c, data)
-		// fmt.Printf("Received RPC %d(seq %d) with %d bytes\n", rpcid, seqno, len(data))
-		go srv.rpcHandle(c, rpcid, seqno, data)
-	}
-	c.Close()
+type reqState struct {
+	data []byte
+	off uint64
 }
 
 type RPCServer struct {
 	handlers map[uint64]func([]byte, *[]byte)
+	epoller *Epoller
+	state map[int]reqState
 }
 
 func MakeRPCServer(handlers map[uint64]func([]byte, *[]byte)) *RPCServer {
-	return &RPCServer{handlers}
+	return &RPCServer{handlers:handlers, epoller:MakeEpoller(), state: make(map[int]reqState)}
 }
 
 func (srv *RPCServer) Serve(port string) {
+	go srv.readThread()
+	go srv.acceptThread(port)
+}
+
+func (srv *RPCServer) acceptThread(port string) {
 	l, err := net.Listen("tcp", port)
 	if err != nil {
 		panic(err)
@@ -66,7 +60,59 @@ func (srv *RPCServer) Serve(port string) {
 		if err != nil {
 			panic(err)
 		}
-		go srv.handleConn(c)
+		fmt.Println("Adding")
+		srv.epoller.Add(c) // FIXME: concurrent map access
+	}
+}
+
+const headerSize = 8*3
+
+func (srv *RPCServer) readThread() {
+	es := srv.epoller.Wait()
+	for _, e := range es {
+		fmt.Println("Polled")
+		f := int(e.Fd)
+		c := srv.epoller.Conns[f]
+		s, ok := srv.state[f]
+		if !ok {
+			s = reqState{data:nil, off:0}
+		}
+		if len(s.data) == 0 {
+			s.data = make([]byte, 1024)
+			s.off = 0
+		}
+
+		n, err := c.Read(s.data[s.off:])
+		if err != nil {
+			panic(err)
+		}
+
+		if s.off < headerSize && headerSize <= (uint64(n) + s.off) {
+			// get length of args data, and grow s.data if needed
+			d := marshal.NewDec(s.data[8*2:8*3])
+			argsLen := d.GetInt()
+			if argsLen > uint64((len(s.data) - 8*3)) {
+				extraSize := argsLen - uint64((len(s.data) - 8*3))
+				s.data = append(s.data, make([]byte, extraSize)...)
+			} else {
+				s.data = s.data[:headerSize + argsLen]
+			}
+		}
+		s.off = s.off + uint64(n)
+		fmt.Printf("%+v\n", s)
+		if s.off == uint64(len(s.data)) {
+			fmt.Println("Here")
+			// got a full request
+			d := marshal.NewDec(s.data)
+			rpcid := d.GetInt()
+			seqno := d.GetInt()
+			d.GetInt() // skip
+			reqData := s.data[headerSize:]
+			go srv.rpcHandle(c, rpcid, seqno, reqData)
+			s = reqState{data:nil, off:0}
+		}
+
+		srv.state[f] = s
 	}
 }
 
@@ -92,6 +138,7 @@ func (cl *RPCClient) replyThread() {
 		if err != nil {
 			panic(err)
 		}
+		fmt.Printf("Client read header %+v\n", headerData)
 
 		d := marshal.NewDec(headerData)
 		seqno := d.GetInt()
@@ -99,6 +146,7 @@ func (cl *RPCClient) replyThread() {
 
 		reply := make([]byte, replyLen)
 		_, err = io.ReadFull(cl.conn, reply)
+		fmt.Printf("Client read %+v\n", reply)
 		if err != nil {
 			panic(err)
 		}
@@ -142,8 +190,8 @@ func (cl *RPCClient) Call(rpcid uint64, args []byte, reply *[]byte) bool {
 
 	e := marshal.NewEnc(8 + 8 + 8 + uint64(len(args)))
 	e.PutInt(rpcid)
-	e.PutInt(uint64(len(args)))
 	e.PutInt(seqno)
+	e.PutInt(uint64(len(args)))
 	e.PutBytes(args)
 	reqData := e.Finish()
 

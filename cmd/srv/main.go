@@ -13,6 +13,6 @@ func main() {
 		return
 	}
 	s := rpc.MakeRPCServer(handlers)
-	go s.Serve(":12345")
+	s.Serve(":12345")
 	select{}
 }
