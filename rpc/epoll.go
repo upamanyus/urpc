@@ -4,7 +4,6 @@ import (
 	"net"
 	"syscall"
 	"reflect"
-	"fmt"
 )
 
 // not concurrency-safe; must only call Add(), Remove() with ownership discipline
@@ -15,7 +14,7 @@ type Epoller struct {
 
 func MakeEpoller() *Epoller {
 	fd, err := syscall.EpollCreate1(0)
-	fmt.Println(fd)
+	// fmt.Println(fd)
 	if err != nil {
 		panic(err)
 	}
@@ -26,8 +25,13 @@ func MakeEpoller() *Epoller {
 }
 
 func (e *Epoller) Wait() []syscall.EpollEvent {
-	events := make([]syscall.EpollEvent, 100)
+	events := make([]syscall.EpollEvent, 50)
+retry:
 	n, err := syscall.EpollWait(e.fd, events, -1)
+	if err == syscall.EINTR {
+		// fmt.Println("EINTR")
+		goto retry
+	}
 	if err != nil {
 		panic(err)
 	}
