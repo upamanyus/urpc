@@ -4,26 +4,33 @@ import (
 	"github.com/tchajed/marshal"
 	"io"
 	"net"
+	"sync"
 )
 
 /// Sender
 type Sender struct {
     conn net.Conn
+    mu   *sync.Mutex
 }
 
 func MakeSender(host string) *Sender {
-	// FIXME: cache "conn" in some global map to make connections live longer
 	conn, _ := net.Dial("tcp", host)
 	// We ignore errors (all packets are just silently dropped)
-	return &Sender { conn }
+	sender := &Sender { conn: conn, mu: new(sync.Mutex) }
+	// FIXME: cache "sender" in some global map to make connections live longer
+	return sender
 }
 
 func Send(send *Sender, data []byte) {
-	e := marshal.NewEnc(8 + uint64(len(data)))
+	e := marshal.NewEnc(8)
 	e.PutInt(uint64(len(data)))
-	e.PutBytes(data)
-	reqData := e.Finish()
-	send.conn.Write(reqData) // one atomic write for the entire thing!
+	header := e.Finish()
+
+	// Make sure this is not interleaved even when this sender is shared.
+	send.mu.Lock()
+	send.conn.Write(header)
+	send.conn.Write(data)
+	send.mu.Unlock()
 }
 
 /// Receiver
